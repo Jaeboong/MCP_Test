@@ -1,0 +1,17 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+*.log
+mcp_server.err.log
+chrome_cdp_profile/
+user_data/
+results.png
+.DS_Store
+Thumbs.db
