@@ -17,9 +17,8 @@ python cli.py
 - terminal 1
 ```
 "C:\Program Files\Google\Chrome\Application\chrome.exe" `
->>   --remote-debugging-port=9222 `
->>   --user-data-dir="C:\ssafy\MCP\chrome_cdp_profile"
->> 
+  --remote-debugging-port=9222 `
+  --user-data-dir="C:\ssafy\MCP\chrome_cdp_profile"
 ```
 - terminal 2
 ```
