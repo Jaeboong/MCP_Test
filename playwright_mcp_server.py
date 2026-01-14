@@ -1,97 +1,14 @@
+import json
 import random
 import sys
-from pathlib import Path
-from typing import Optional
-import os
-import json
 
 from mcp.server.fastmcp import FastMCP
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import Page
+
+from browser_state import ensure_page, shutdown_browser, state, switch_to_latest_page
+from generic_actions import action_terms_for_input
 
 mcp = FastMCP("playwright-mcp")
-
-
-class BrowserState:
-    def __init__(self) -> None:
-        self.playwright = None
-        self.browser: Optional[Browser] = None
-        self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
-        self.headless = False
-        self.user_data_dir = Path("C:/ssafy/MCP/user_data")
-        self.use_cdp = True
-        self.cdp_url = os.environ.get("PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
-        self.locale = "ko-KR"
-        self.timezone_id = "Asia/Seoul"
-        self.user_agent = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/121.0.0.0 Safari/537.36"
-        )
-        self._page_listener_attached = False
-
-
-state = BrowserState()
-
-
-async def ensure_page() -> Page:
-    if state.page is not None:
-        return state.page
-
-    if state.playwright is None:
-        state.playwright = await async_playwright().start()
-
-    if state.browser is None and state.use_cdp:
-        state.browser = await state.playwright.chromium.connect_over_cdp(state.cdp_url)
-
-    if state.context is None:
-        if state.use_cdp and state.browser is not None:
-            if state.browser.contexts:
-                state.context = state.browser.contexts[0]
-            else:
-                state.context = await state.browser.new_context()
-        else:
-            state.user_data_dir.mkdir(parents=True, exist_ok=True)
-            state.context = await state.playwright.chromium.launch_persistent_context(
-                user_data_dir=str(state.user_data_dir),
-                headless=state.headless,
-                args=["--disable-blink-features=AutomationControlled"],
-                locale=state.locale,
-                timezone_id=state.timezone_id,
-                user_agent=state.user_agent,
-                viewport={"width": 1365, "height": 768},
-                device_scale_factor=1.0,
-                is_mobile=False,
-                has_touch=False,
-            )
-            await state.context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-            )
-            await state.context.set_extra_http_headers(
-                {
-                    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-                }
-            )
-
-    if state.context is not None and not state._page_listener_attached:
-        def _on_new_page(page: Page) -> None:
-            state.page = page
-
-        state.context.on("page", _on_new_page)
-        state._page_listener_attached = True
-
-    state.page = await state.context.new_page()
-    return state.page
-
-
-async def switch_to_latest_page() -> Page:
-    if state.context is None:
-        return await ensure_page()
-    pages = state.context.pages
-    if not pages:
-        return await ensure_page()
-    state.page = pages[-1]
-    return state.page
 
 
 @mcp.tool()
@@ -123,6 +40,64 @@ async def click(selector: str) -> str:
     page = await ensure_page()
     await page.click(selector)
     return f"clicked {selector}"
+
+
+@mcp.tool()
+async def click_in_frames(selector: str) -> str:
+    """
+    Click the first element matching selector across frames.
+    """
+    page = await ensure_page()
+    for frame in page.frames:
+        try:
+            locator = frame.locator(selector)
+        except Exception:
+            continue
+        try:
+            if await locator.count() > 0:
+                await locator.first.click()
+                return f"clicked {selector}"
+        except Exception:
+            continue
+    return f"not_found_selector {selector}"
+
+
+@mcp.tool()
+async def click_text(text: str) -> str:
+    """
+    Click the first element that matches the given text, across frames.
+    """
+    page = await ensure_page()
+    terms = action_terms_for_input(text) or [text]
+
+    async def _click_first(locator) -> bool:
+        try:
+            if await locator.count() > 0:
+                await locator.first.click()
+                return True
+        except Exception:
+            return False
+        return False
+
+    for frame in page.frames:
+        for term in terms:
+            if await _click_first(frame.get_by_role("button", name=term)):
+                return f"clicked_text {term}"
+            if await _click_first(frame.get_by_text(term)):
+                return f"clicked_text {term}"
+            selectors = [
+                f"[aria-label*='{term}']",
+                f"[title*='{term}']",
+                f"input[value*='{term}']",
+            ]
+            for selector in selectors:
+                try:
+                    locator = frame.locator(selector)
+                except Exception:
+                    continue
+                if await _click_first(locator):
+                    return f"clicked_text {term}"
+    return f"not_found_text {text}"
 
 
 @mcp.tool()
@@ -208,13 +183,16 @@ async def get_visible_buttons(max_items: int = 200) -> str:
     """
     page = await ensure_page()
     selector_script = """
-      (maxItems) => {
+      (maxItems, includePadKeys) => {
         const selectors = [
           "button",
           "a[role='button']",
           "input[type='button']",
           "input[type='submit']",
         ];
+        if (includePadKeys) {
+          selectors.push("a.pad-key");
+        }
         const nodes = Array.from(document.querySelectorAll(selectors.join(",")));
         const visible = [];
         for (const el of nodes) {
@@ -227,6 +205,7 @@ async def get_visible_buttons(max_items: int = 200) -> str:
           visible.push({
             class: (el.className || "").toString(),
             text,
+            dataKey: el.getAttribute("data-key") || "",
           });
         }
         return visible;
@@ -237,8 +216,9 @@ async def get_visible_buttons(max_items: int = 200) -> str:
     for frame in page.frames:
         if remaining <= 0:
             break
+        include_pad_keys = "coupang.com" in frame.url
         try:
-            items = await frame.evaluate(selector_script, remaining)
+            items = await frame.evaluate(selector_script, remaining, include_pad_keys)
         except Exception:
             continue
         if not items:
@@ -268,14 +248,8 @@ async def close_browser() -> str:
     """
     Close browser/context and stop Playwright.
     """
-    if state.page is not None:
-        await state.page.close()
-        state.page = None
-
-    if state.context is not None:
-        await state.context.close()
-        state.context = None
-    state._page_listener_attached = False
+    await shutdown_browser()
+    return "browser_closed"
 
 
 @mcp.tool()
@@ -285,16 +259,6 @@ async def switch_latest_page() -> str:
     """
     page = await switch_to_latest_page()
     return f"switched {page.url}"
-
-    if state.browser is not None:
-        await state.browser.close()
-        state.browser = None
-
-    if state.playwright is not None:
-        await state.playwright.stop()
-        state.playwright = None
-
-    return "browser_closed"
 
 
 def main() -> None:
